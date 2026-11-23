@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/scans/cron?job=morning",
+      "schedule": "30 3 * * *"
+    },
+    {
+      "path": "/api/scans/cron?job=midday",
+      "schedule": "30 8 * * *"
+    },
+    {
+      "path": "/api/scans/cron?job=evening",
+      "schedule": "30 12 * * *"
+    }
+  ]
+}
