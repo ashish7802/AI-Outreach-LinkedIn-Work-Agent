@@ -48,6 +48,41 @@ export class LinkedInOfficialAdapter {
   }
 
   /**
+   * Verify token against official LinkedIn UserInfo endpoint
+   */
+  async verifyTokenWithAPI(): Promise<{ valid: boolean; identity?: string; error?: string }> {
+    if (!this.accessToken) {
+      return { valid: false, error: 'LINKEDIN_ACCESS_TOKEN is missing' };
+    }
+
+    try {
+      const response = await fetch('https://api.linkedin.com/v2/userinfo', {
+        headers: {
+          Authorization: `Bearer ${this.accessToken}`,
+        },
+      });
+
+      if (!response.ok) {
+        return {
+          valid: false,
+          error: `LinkedIn OAuth token rejected by API (${response.status})`,
+        };
+      }
+
+      const userInfo = await response.json();
+      return {
+        valid: true,
+        identity: userInfo.sub || userInfo.name,
+      };
+    } catch (err: any) {
+      return {
+        valid: false,
+        error: `Could not reach LinkedIn authentication endpoint: ${err.message}`,
+      };
+    }
+  }
+
+  /**
    * Publish a post via official UGC/Posts API if authorized.
    * If permissions are missing, truthfully returns 'unavailable' with a ready-to-copy draft.
    */

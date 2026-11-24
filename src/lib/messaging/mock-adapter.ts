@@ -1,7 +1,7 @@
 import { MessagingAdapter, SendResult, WebhookEventPayload } from './types';
 
 export class MockMessagingAdapter implements MessagingAdapter {
-  name = 'Mock Messaging Adapter (Verified Test Mode)';
+  name = 'Mock Messaging Adapter (Simulated Test Mode Only)';
   channel = 'mock_channel';
 
   async sendMessage(params: {
@@ -10,7 +10,7 @@ export class MockMessagingAdapter implements MessagingAdapter {
     body: string;
     idempotencyKey: string;
   }): Promise<SendResult> {
-    const extId = `mock_ext_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const extId = `sim_mock_ext_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
     return {
       success: true,
@@ -21,6 +21,8 @@ export class MockMessagingAdapter implements MessagingAdapter {
         external_id: extId,
         dispatched_to: params.recipient,
         body_length: params.body.length,
+        simulated: true,
+        simulation_note: 'This is a simulated message send for non-production development/testing only.',
         timestamp: new Date().toISOString(),
       },
     };
@@ -49,7 +51,10 @@ export class MockMessagingAdapter implements MessagingAdapter {
         timestamp: data.timestamp || new Date().toISOString(),
         reply_content: data.reply_content,
         error_details: data.error_details,
-        raw_payload: data,
+        raw_payload: {
+          ...data,
+          simulated: true,
+        },
       };
     } catch {
       return null;

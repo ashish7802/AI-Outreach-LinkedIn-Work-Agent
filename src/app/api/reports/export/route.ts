@@ -1,12 +1,19 @@
 import { NextResponse } from 'next/server';
 import { repository } from '@/lib/db/repository';
+import { authenticateRequest } from '@/lib/auth/auth-guard';
 
 export async function GET(req: Request) {
   try {
+    const auth = await authenticateRequest(req, { allowServerApiKey: true });
+    if (!auth.authorized) {
+      return NextResponse.json({ error: auth.error || 'Unauthorized' }, { status: auth.statusCode });
+    }
+
     const { searchParams } = new URL(req.url);
     const type = searchParams.get('type') || 'reports'; // 'reports' | 'leads' | 'audit'
 
-    const workspace = await repository.getWorkspace();
+    const workspaceId = auth.workspaceId || 'ws_default_001';
+    const workspace = await repository.getWorkspace(workspaceId);
 
     if (type === 'leads') {
       const leads = await repository.getLeads(workspace.id);

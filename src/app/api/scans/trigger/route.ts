@@ -1,13 +1,23 @@
 import { NextResponse } from 'next/server';
 import { ScanOrchestrator } from '@/lib/scans/orchestrator';
 import { repository } from '@/lib/db/repository';
+import { authenticateRequest } from '@/lib/auth/auth-guard';
 
 export async function POST(req: Request) {
   try {
+    const auth = await authenticateRequest(req, {
+      allowCronSecret: true,
+      allowServerApiKey: true,
+    });
+    if (!auth.authorized) {
+      return NextResponse.json({ error: auth.error || 'Unauthorized' }, { status: auth.statusCode });
+    }
+
     const body = await req.json().catch(() => ({}));
     const { scan_type = 'full_scan', source = 'manual' } = body;
 
-    const workspace = await repository.getWorkspace();
+    const workspaceId = auth.workspaceId || 'ws_default_001';
+    const workspace = await repository.getWorkspace(workspaceId);
     if (workspace.agent_status !== 'active') {
       return NextResponse.json(
         { error: `Cannot trigger scan: Agent is currently ${workspace.agent_status}` },

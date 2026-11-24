@@ -12,10 +12,10 @@ export async function POST(req: Request) {
 
     const adapter = getMessagingAdapter('email');
 
-    // 1. Signature Verification
+    // 1. Signature Verification (Fail closed if invalid or secret missing in prod)
     const isValid = await adapter.verifyWebhook(headers, rawBody);
     if (!isValid) {
-      return NextResponse.json({ error: 'Invalid webhook signature' }, { status: 401 });
+      return NextResponse.json({ error: 'Invalid webhook signature or missing signing secret' }, { status: 401 });
     }
 
     // 2. Event Parsing
@@ -24,10 +24,29 @@ export async function POST(req: Request) {
       return NextResponse.json({ received: true, ignored: true });
     }
 
+    // 3. Replay Protection & Event Deduplication
+    const eventDeduplicationKey = event.external_message_id
+      ? `${event.event_type}_${event.external_message_id}_${event.timestamp}`
+      : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+    const dedupResult = await repository.recordWebhookEvent({
+      id: `whk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      provider: 'resend',
+      event_id: eventDeduplicationKey,
+      event_type: event.event_type,
+      recipient_identifier: event.recipient_identifier,
+      payload: event.raw_payload,
+    });
+
+    if (dedupResult.duplicate) {
+      // Event has already been processed idempotently
+      return NextResponse.json({ received: true, duplicate: true });
+    }
+
     const workspace = await repository.getWorkspace();
     const messages = await repository.getMessages(workspace.id);
 
-    // 3. Match message by external_message_id
+    // 4. Match message by external_message_id
     const matchedMessage = messages.find(
       (m) => m.external_message_id === event.external_message_id
     );

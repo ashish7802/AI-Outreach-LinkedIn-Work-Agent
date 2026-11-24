@@ -1,19 +1,20 @@
 import { NextResponse } from 'next/server';
 import { ScanOrchestrator } from '@/lib/scans/orchestrator';
 import { repository } from '@/lib/db/repository';
+import { verifyCronSecret } from '@/lib/auth/auth-guard';
 
 export async function GET(req: Request) {
+  // Constant-time cron secret verification
+  const cronCheck = verifyCronSecret(req);
+  if (!cronCheck.authorized) {
+    return NextResponse.json(
+      { error: cronCheck.error || 'Unauthorized: Invalid cron credential' },
+      { status: 401 }
+    );
+  }
+
   const { searchParams } = new URL(req.url);
   const job = searchParams.get('job'); // 'morning' | 'midday' | 'evening'
-
-  // Security check: optional Vercel cron secret verification
-  const authHeader = req.headers.get('authorization');
-  if (process.env.CRON_SECRET && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-    // In local or unconfigured mode, allow
-    if (process.env.NODE_ENV === 'production') {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-  }
 
   try {
     const workspace = await repository.getWorkspace();

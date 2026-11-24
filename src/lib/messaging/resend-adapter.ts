@@ -72,8 +72,13 @@ export class ResendAdapter implements MessagingAdapter {
   }
 
   async verifyWebhook(headers: Record<string, string>, rawBody: string): Promise<boolean> {
-    if (!this.webhookSecret) {
-      // In development if no secret is set, log warning
+    const isProduction = process.env.NODE_ENV === 'production';
+    if (!this.webhookSecret || this.webhookSecret.trim() === '') {
+      if (isProduction) {
+        console.error('Fatal: WEBHOOK_SIGNING_SECRET is unconfigured in production. Rejecting webhook.');
+        return false;
+      }
+      // Only in local development if no secret is configured
       return true;
     }
 
@@ -85,10 +90,10 @@ export class ResendAdapter implements MessagingAdapter {
       return false;
     }
 
-    // Check timestamp freshness (within 5 minutes)
+    // Check timestamp freshness (within 5 minutes = 300 seconds replay protection)
     const timestampNum = parseInt(timestamp, 10);
     const now = Math.floor(Date.now() / 1000);
-    if (Math.abs(now - timestampNum) > 300) {
+    if (isNaN(timestampNum) || Math.abs(now - timestampNum) > 300) {
       return false;
     }
 
@@ -98,7 +103,14 @@ export class ResendAdapter implements MessagingAdapter {
         .update(`${timestamp}.${rawBody}`)
         .digest('hex');
 
-      return signature.includes(expectedSignature);
+      // Svix signatures might be formatted as 'v1,sig1 v1,sig2'
+      const sigList = signature.split(' ').map((s) => s.replace(/^v\d+,/, ''));
+      for (const sig of sigList) {
+        if (sig.length === expectedSignature.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSignature))) {
+          return true;
+        }
+      }
+      return false;
     } catch {
       return false;
     }

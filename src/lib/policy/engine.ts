@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import {
   WorkspaceConfig,
   CampaignInstruction,
@@ -148,7 +149,7 @@ export class SendPolicyEngine {
   }
 
   /**
-   * Generate deterministic idempotency key for a send job
+   * Generate deterministic cryptographic idempotency key for a send job using SHA-256
    */
   static generateIdempotencyKey(
     workspaceId: string,
@@ -157,14 +158,8 @@ export class SendPolicyEngine {
     recipient: string,
     exactMessage: string
   ): string {
-    // Simple deterministic hash
-    const input = `${workspaceId}:${campaignId}:${leadId}:${recipient}:${exactMessage}`;
-    let hash = 0;
-    for (let i = 0; i < input.length; i++) {
-      const char = input.charCodeAt(i);
-      hash = (hash << 5) - hash + char;
-      hash |= 0;
-    }
-    return `idem_${Math.abs(hash).toString(36)}_${leadId.slice(0, 8)}`;
+    const input = `${workspaceId.trim()}:${campaignId.trim()}:${leadId.trim()}:${recipient.trim().toLowerCase()}:${exactMessage.trim()}`;
+    const hash = crypto.createHash('sha256').update(input, 'utf8').digest('hex');
+    return `idem_sha256_${hash.slice(0, 32)}_${leadId.slice(0, 8)}`;
   }
 }

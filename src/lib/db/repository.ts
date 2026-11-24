@@ -31,6 +31,7 @@ interface LocalDatabaseState {
   reports: ExecutionReport[];
   suppression_list: SuppressionEntry[];
   audit_events: AuditEvent[];
+  webhook_events?: any[];
 }
 
 const DATA_DIR = path.join(process.cwd(), '.data');
@@ -360,7 +361,17 @@ The result? An agent that acts with predictable precision.`,
 }
 
 class Repository {
+  private memoryState: LocalDatabaseState | null = null;
+
   private loadLocal(): LocalDatabaseState {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'Database Error: Local JSON filesystem storage is prohibited in production. Valid Supabase configuration is required.'
+      );
+    }
+    if (this.memoryState) {
+      return this.memoryState;
+    }
     try {
       if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -368,16 +379,25 @@ class Repository {
       if (!fs.existsSync(DATA_FILE)) {
         const initial = getInitialState();
         fs.writeFileSync(DATA_FILE, JSON.stringify(initial, null, 2), 'utf-8');
+        this.memoryState = initial;
         return initial;
       }
       const raw = fs.readFileSync(DATA_FILE, 'utf-8');
-      return JSON.parse(raw);
+      this.memoryState = JSON.parse(raw);
+      return this.memoryState!;
     } catch {
-      return getInitialState();
+      this.memoryState = getInitialState();
+      return this.memoryState;
     }
   }
 
   private saveLocal(state: LocalDatabaseState): void {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'Database Error: Cannot write to local filesystem store in production environment.'
+      );
+    }
+    this.memoryState = state;
     try {
       if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -884,6 +904,103 @@ class Repository {
     return fullReport;
   }
 
+  private redactSecrets(obj: any): any {
+    if (!obj || typeof obj !== 'object') return obj;
+    const cloned = Array.isArray(obj) ? [...obj] : { ...obj };
+    const sensitiveKeys = ['authorization', 'api_key', 'apikey', 'secret', 'token', 'access_token', 'password'];
+    for (const key of Object.keys(cloned)) {
+      if (sensitiveKeys.some((s) => key.toLowerCase().includes(s))) {
+        cloned[key] = '[REDACTED]';
+      } else if (typeof cloned[key] === 'object') {
+        cloned[key] = this.redactSecrets(cloned[key]);
+      }
+    }
+    return cloned;
+  }
+
+  // Atomic Job Claiming to prevent race conditions across concurrent workers
+  async claimSendJob(jobId: string, workerId: string = 'worker_node_1'): Promise<SendJob | null> {
+    if (process.env.NODE_ENV === 'production' && (!isSupabaseConfigured || !supabaseAdmin)) {
+      throw new Error('Database Error: Supabase is required in production.');
+    }
+    if (isSupabaseConfigured && supabaseAdmin) {
+      const now = new Date().toISOString();
+      const { data, error } = await supabaseAdmin
+        .from('send_jobs')
+        .update({
+          status: 'processing',
+          locked_at: now,
+          locked_by: workerId,
+          updated_at: now,
+        })
+        .eq('id', jobId)
+        .eq('status', 'queued')
+        .select()
+        .single();
+      if (error || !data) return null;
+      return data;
+    }
+    const state = this.loadLocal();
+    const job = state.send_jobs.find((j) => j.id === jobId);
+    if (!job || job.status !== 'queued') {
+      return null;
+    }
+    job.status = 'processing';
+    job.locked_at = new Date().toISOString();
+    job.locked_by = workerId;
+    job.updated_at = new Date().toISOString();
+    this.saveLocal(state);
+    return job;
+  }
+
+  // Webhook Event Deduplication & Replay Protection
+  async recordWebhookEvent(event: {
+    id: string;
+    provider: string;
+    event_id: string;
+    event_type: string;
+    recipient_identifier?: string;
+    payload?: any;
+  }): Promise<{ recorded: boolean; duplicate: boolean }> {
+    if (process.env.NODE_ENV === 'production' && (!isSupabaseConfigured || !supabaseAdmin)) {
+      throw new Error('Database Error: Supabase is required in production.');
+    }
+    if (isSupabaseConfigured && supabaseAdmin) {
+      const { error } = await supabaseAdmin.from('webhook_events').insert({
+        id: event.id,
+        provider: event.provider,
+        event_id: event.event_id,
+        event_type: event.event_type,
+        recipient_identifier: event.recipient_identifier,
+        payload: this.redactSecrets(event.payload || {}),
+      });
+      if (error) {
+        if (error.code === '23505' || error.message?.includes('duplicate') || error.message?.includes('unique')) {
+          return { recorded: false, duplicate: true };
+        }
+        throw error;
+      }
+      return { recorded: true, duplicate: false };
+    }
+    const state = this.loadLocal();
+    if (!state.webhook_events) {
+      state.webhook_events = [];
+    }
+    const exists = state.webhook_events.some(
+      (e: any) => e.provider === event.provider && e.event_id === event.event_id
+    );
+    if (exists) {
+      return { recorded: false, duplicate: true };
+    }
+    state.webhook_events.push({
+      ...event,
+      payload: this.redactSecrets(event.payload || {}),
+      processed_at: new Date().toISOString(),
+    });
+    this.saveLocal(state);
+    return { recorded: true, duplicate: false };
+  }
+
   // Audit Events
   async getAuditEvents(workspaceId: string = 'ws_default_001'): Promise<AuditEvent[]> {
     if (isSupabaseConfigured && supabaseAdmin) {
@@ -904,6 +1021,7 @@ class Repository {
     const fullEvent: AuditEvent = {
       id: `aud_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       ...event,
+      details: this.redactSecrets(event.details || {}),
       created_at: new Date().toISOString(),
     };
     if (isSupabaseConfigured && supabaseAdmin) {

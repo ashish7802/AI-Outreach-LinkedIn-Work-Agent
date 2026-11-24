@@ -152,8 +152,20 @@ export interface SendJob {
   max_attempts: number;
   policy_check_result?: PolicyEvaluationResult | null;
   error_message?: string | null;
+  locked_at?: string | null;
+  locked_by?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface WebhookEventRecord {
+  id: string;
+  provider: string;
+  event_id: string;
+  event_type: string;
+  recipient_identifier?: string;
+  payload?: any;
+  processed_at: string;
 }
 
 export interface PolicyEvaluationResult {

@@ -45,6 +45,7 @@ export class ScanOrchestrator {
 
       for (const lead of researchResult.discovered_leads) {
         const leadId = `lead_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        const isModelSuggestion = workspace.model_provider === 'mock' || !lead.source_url.startsWith('http');
         const result = await repository.addLead({
           id: leadId,
           workspace_id: workspaceId,
@@ -56,7 +57,7 @@ export class ScanOrchestrator {
           linkedin_url: lead.linkedin_url,
           recipient_identifier: lead.recipient_identifier,
           source_url: lead.source_url,
-          evidence: lead.evidence,
+          evidence: isModelSuggestion ? `[Model Suggestion - Unverified Public Evidence]: ${lead.evidence}` : lead.evidence,
           fit_score: lead.fit_score,
           status: 'qualified',
         });
@@ -330,32 +331,68 @@ export class ScanOrchestrator {
         inst.exact_message_text
       );
 
-      // Check if job or message already exists with this idempotency key
+      // Verify that this exact message was not already dispatched
+      const alreadySentMessage = messages.find(
+        (m) =>
+          m.direction === 'outbound' &&
+          m.instruction_id === inst.id &&
+          (m.status === 'sent' || m.status === 'delivered')
+      );
+      if (alreadySentMessage) {
+        await repository.updateInstruction(inst.id, { validation_status: 'executed' });
+        continue;
+      }
+
+      // Check if job already exists for this idempotency key
       const existingJobs = await repository.getSendJobs(workspaceId);
-      const existingJob = existingJobs.find((j) => j.idempotency_key === idempotencyKey);
+      let existingJob = existingJobs.find((j) => j.idempotency_key === idempotencyKey);
 
       if (existingJob && existingJob.status === 'completed') {
         // Skip duplicate
         continue;
       }
 
-      if (!policyCheck.passed) {
-        // Mark as needs_review and block send
-        await repository.updateInstruction(inst.id, {
-          validation_status: 'needs_review',
-          review_reason: policyCheck.reasons.join('; '),
-        });
-
-        await repository.createSendJob({
+      // Atomic Job Claiming: prevent concurrent workers from claiming the same send
+      let currentJob: any = existingJob;
+      if (!currentJob) {
+        currentJob = await repository.createSendJob({
           id: `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           workspace_id: workspaceId,
           instruction_id: inst.id,
           idempotency_key: idempotencyKey,
-          status: 'blocked_policy',
-          attempt_count: 1,
+          status: 'queued',
+          attempt_count: 0,
           max_attempts: 3,
-          policy_check_result: policyCheck,
-          error_message: policyCheck.reasons.join('; '),
+        });
+      }
+
+      // Claim job with lease lock
+      const claimed = await repository.claimSendJob(currentJob.id, 'worker_cron');
+      if (!claimed) {
+        // Job was claimed or processed by another concurrent process
+        continue;
+      }
+
+      // Re-check Send Policy immediately before dispatch
+      const freshPolicyCheck = SendPolicyEngine.evaluate({
+        instruction: inst,
+        workspace,
+        integration,
+        suppressionList,
+        todaySentCount: todaySentCount + sent,
+      });
+
+      if (!freshPolicyCheck.passed) {
+        await repository.updateInstruction(inst.id, {
+          validation_status: 'needs_review',
+          review_reason: freshPolicyCheck.reasons.join('; '),
+        });
+
+        await repository.updateSendJob(currentJob.id, {
+          status: 'blocked_policy',
+          attempt_count: currentJob.attempt_count + 1,
+          policy_check_result: freshPolicyCheck,
+          error_message: freshPolicyCheck.reasons.join('; '),
         });
 
         await repository.logAudit({
@@ -366,7 +403,7 @@ export class ScanOrchestrator {
           details: {
             instruction_id: inst.id,
             recipient: inst.recipient_identifier,
-            reasons: policyCheck.reasons,
+            reasons: freshPolicyCheck.reasons,
           },
         });
 
@@ -374,18 +411,7 @@ export class ScanOrchestrator {
         continue;
       }
 
-      // Record job processing
-      const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      await repository.createSendJob({
-        id: jobId,
-        workspace_id: workspaceId,
-        instruction_id: inst.id,
-        idempotency_key: idempotencyKey,
-        status: 'processing',
-        attempt_count: 1,
-        max_attempts: 3,
-        policy_check_result: policyCheck,
-      });
+      const jobId = currentJob.id;
 
       // Send exact message through configured adapter
       const adapter = getMessagingAdapter(inst.channel);

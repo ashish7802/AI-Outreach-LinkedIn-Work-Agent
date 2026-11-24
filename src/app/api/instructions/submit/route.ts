@@ -1,9 +1,15 @@
 import { NextResponse } from 'next/server';
 import { ModelInstructionsEnvelopeSchema } from '@/lib/schemas/instruction';
 import { repository } from '@/lib/db/repository';
+import { authenticateRequest } from '@/lib/auth/auth-guard';
 
 export async function POST(req: Request) {
   try {
+    const auth = await authenticateRequest(req, { allowServerApiKey: true });
+    if (!auth.authorized) {
+      return NextResponse.json({ error: auth.error || 'Unauthorized' }, { status: auth.statusCode });
+    }
+
     const body = await req.json();
 
     // 1. Versioned Zod schema validation
@@ -20,7 +26,8 @@ export async function POST(req: Request) {
     }
 
     const envelope = parsed.data;
-    const workspace = await repository.getWorkspace();
+    const workspaceId = auth.workspaceId || 'ws_default_001';
+    const workspace = await repository.getWorkspace(workspaceId);
     const storedInstructions = [];
 
     for (const item of envelope.instructions) {
@@ -50,7 +57,7 @@ export async function POST(req: Request) {
     await repository.logAudit({
       workspace_id: workspace.id,
       event_type: 'instructions_received',
-      actor: 'instruction_receiver',
+      actor: auth.userId || 'model_or_user',
       severity: 'info',
       details: {
         campaign_id: envelope.campaign_id,

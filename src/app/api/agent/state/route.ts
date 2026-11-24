@@ -1,13 +1,20 @@
 import { NextResponse } from 'next/server';
 import { repository } from '@/lib/db/repository';
+import { authenticateRequest } from '@/lib/auth/auth-guard';
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    const workspace = await repository.getWorkspace();
-    const leads = await repository.getLeads();
-    const messages = await repository.getMessages();
-    const instructions = await repository.getInstructions();
-    const sendJobs = await repository.getSendJobs();
+    const auth = await authenticateRequest(req, { allowServerApiKey: true });
+    if (!auth.authorized) {
+      return NextResponse.json({ error: auth.error || 'Unauthorized' }, { status: auth.statusCode });
+    }
+
+    const workspaceId = auth.workspaceId || 'ws_default_001';
+    const workspace = await repository.getWorkspace(workspaceId);
+    const leads = await repository.getLeads(workspaceId);
+    const messages = await repository.getMessages(workspaceId);
+    const instructions = await repository.getInstructions(workspaceId);
+    const sendJobs = await repository.getSendJobs(workspaceId);
 
     return NextResponse.json({
       workspace,
@@ -28,10 +35,16 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
+    const auth = await authenticateRequest(req, { allowServerApiKey: true });
+    if (!auth.authorized) {
+      return NextResponse.json({ error: auth.error || 'Unauthorized' }, { status: auth.statusCode });
+    }
+
     const body = await req.json();
     const { action } = body; // 'pause_agent' | 'resume_agent' | 'pause_sending' | 'resume_sending' | 'stop_all'
 
-    const workspace = await repository.getWorkspace();
+    const workspaceId = auth.workspaceId || 'ws_default_001';
+    const workspace = await repository.getWorkspace(workspaceId);
     let updates: any = {};
 
     if (action === 'pause_agent') {
@@ -54,7 +67,7 @@ export async function POST(req: Request) {
     await repository.logAudit({
       workspace_id: workspace.id,
       event_type: `agent_control_${action}`,
-      actor: 'user_action',
+      actor: auth.userId || 'authorized_user',
       severity: action === 'stop_all' ? 'warn' : 'info',
       details: { action, new_agent_status: updated.agent_status, new_sending_status: updated.sending_status },
     });
